@@ -69,7 +69,7 @@ function calcularFrete(subtotal) {
   if (subtotal <= 0) {
     return 0;
   }
-  if (subtotal > FRETE_GRATIS_A_PARTIR_DE) {
+  if (subtotal >= FRETE_GRATIS_A_PARTIR_DE) {
     return 0;
   }
   return VALOR_FRETE;
