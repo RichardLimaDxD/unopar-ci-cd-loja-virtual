@@ -1,0 +1,16 @@
+node_modules
+npm-debug.log
+.git
+.github
+.gitlab-ci.yml
+.gitignore
+.gitattributes
+.dockerignore
+Dockerfile
+README.md
+test
+reports
+coverage
+resultado-testes.txt
+eslint.config.js
+.env
