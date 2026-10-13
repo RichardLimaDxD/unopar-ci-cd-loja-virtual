@@ -1,0 +1,279 @@
+# Pipeline de entrega contínua da Loja Virtual (GitHub Actions)
+# Fluxo: build -> test -> docker -> deploy
+# Equivalente ao arquivo .gitlab-ci.yml presente na raiz do repositório.
+name: Pipeline CI/CD - Loja Virtual
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# Permissão mínima por padrão; o job docker amplia apenas o que precisa
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Estágio 1 - BUILD: instala dependências, roda o lint e valida a sintaxe
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build e lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Executar lint (ESLint)
+        run: npm run lint
+
+      - name: Verificar sintaxe dos arquivos
+        run: |
+          for arquivo in src/*.js; do
+            node --check "$arquivo"
+            echo "Sintaxe OK: $arquivo"
+          done
+
+      - name: Resumo do build
+        run: |
+          {
+            echo "## Build"
+            echo "✅ Build e lint concluídos"
+            echo ""
+            echo "- Node.js: $(node --version)"
+            echo "- Commit: \`${GITHUB_SHA::7}\`"
+            echo "- Branch: \`${GITHUB_REF_NAME}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Estágio 2 - TEST: testes unitários e de integração (node:test + supertest)
+  # O job FALHA se qualquer teste falhar, interrompendo o pipeline.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Testes automatizados
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Executar testes
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee resultado-testes.txt
+
+      - name: Publicar resultado dos testes no resumo
+        if: always()
+        shell: bash
+        run: |
+          ARQUIVO=resultado-testes.txt
+          {
+            echo "## Resultado dos testes"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ ! -f "$ARQUIVO" ]; then
+            echo "⚠️ Os testes não chegaram a ser executados." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Remove códigos de cor ANSI, se houver
+          sed -i 's/\x1b\[[0-9;]*m//g' "$ARQUIVO"
+
+          TOTAL=$(awk '/^ℹ tests /{print $3}' "$ARQUIVO" | tail -n 1)
+          PASSOU=$(awk '/^ℹ pass /{print $3}' "$ARQUIVO" | tail -n 1)
+          FALHOU=$(awk '/^ℹ fail /{print $3}' "$ARQUIVO" | tail -n 1)
+          TOTAL=${TOTAL:-0}; PASSOU=${PASSOU:-0}; FALHOU=${FALHOU:-0}
+
+          if [ "$FALHOU" -gt 0 ]; then
+            STATUS="❌ Falhou"
+          else
+            STATUS="✅ Sucesso"
+          fi
+
+          {
+            echo "**Status:** $STATUS"
+            echo ""
+            echo "| Testes | Passaram | Falharam |"
+            echo "|:------:|:--------:|:--------:|"
+            echo "| $TOTAL | $PASSOU | $FALHOU |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$FALHOU" -gt 0 ]; then
+            {
+              echo ""
+              echo "### Testes que falharam"
+              echo ""
+              echo '```text'
+              sed -n '/✖ failing tests:/,$p' "$ARQUIVO" | head -n 80
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Salvar resultado dos testes como artefato
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultado-testes
+          path: resultado-testes.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Estágio 3 - DOCKER: gera a imagem, faz smoke test e publica no GHCR (main)
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Imagem Docker
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      imagem: ${{ steps.nomes.outputs.imagem }}
+      tag: ${{ steps.nomes.outputs.tag }}
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Definir nome e tags da imagem (minúsculas)
+        id: nomes
+        shell: bash
+        run: |
+          DONO="${GITHUB_REPOSITORY_OWNER,,}"
+          REPOSITORIO="${GITHUB_REPOSITORY#*/}"
+          REPOSITORIO="${REPOSITORIO,,}"
+          IMAGEM="ghcr.io/${DONO}/${REPOSITORIO}"
+          TAG="${GITHUB_SHA::7}"
+          echo "imagem=${IMAGEM}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Imagem: ${IMAGEM}:${TAG}"
+
+      - name: Construir a imagem
+        env:
+          IMAGEM: ${{ steps.nomes.outputs.imagem }}
+          TAG: ${{ steps.nomes.outputs.tag }}
+        run: |
+          docker build \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.description=Loja Virtual UNOPAR" \
+            -t "${IMAGEM}:${TAG}" \
+            -t "${IMAGEM}:latest" \
+            .
+
+      - name: Smoke test do container (GET /api/health)
+        env:
+          IMAGEM: ${{ steps.nomes.outputs.imagem }}
+          TAG: ${{ steps.nomes.outputs.tag }}
+        run: |
+          docker run -d --name loja-smoke -p 3000:3000 "${IMAGEM}:${TAG}"
+          for tentativa in $(seq 1 15); do
+            if RESPOSTA=$(curl -fsS http://localhost:3000/api/health); then
+              echo "Tentativa ${tentativa}: ${RESPOSTA}"
+              echo "$RESPOSTA" | grep -q '"status":"ok"' && exit 0
+            fi
+            echo "Tentativa ${tentativa}: aplicação ainda não respondeu, aguardando..."
+            sleep 2
+          done
+          echo "Smoke test falhou: a aplicação não respondeu em /api/health"
+          docker logs loja-smoke
+          exit 1
+
+      - name: Remover container de teste
+        if: always()
+        run: docker rm -f loja-smoke || true
+
+      - name: Login no GitHub Container Registry
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publicar a imagem no GHCR
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          IMAGEM: ${{ steps.nomes.outputs.imagem }}
+          TAG: ${{ steps.nomes.outputs.tag }}
+        run: |
+          docker push "${IMAGEM}:${TAG}"
+          docker push "${IMAGEM}:latest"
+
+      - name: Resumo da imagem
+        if: always()
+        env:
+          IMAGEM: ${{ steps.nomes.outputs.imagem }}
+          TAG: ${{ steps.nomes.outputs.tag }}
+          PUBLICAR: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+        run: |
+          {
+            echo "## Imagem Docker"
+            echo ""
+            echo "| Tag | Valor |"
+            echo "|-----|-------|"
+            echo "| Commit | \`${IMAGEM}:${TAG}\` |"
+            echo "| Mais recente | \`${IMAGEM}:latest\` |"
+            echo ""
+            if [ "$PUBLICAR" = "true" ]; then
+              echo "📦 Imagem publicada no GitHub Container Registry."
+            else
+              echo "ℹ️ Branch \`${GITHUB_REF_NAME}\`: imagem construída e testada, mas não publicada (somente a main publica)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Estágio 4 - DEPLOY: implantação (simulada) em produção, somente na main
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy em produção
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    environment:
+      name: production
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Deploy simulado
+        env:
+          IMAGEM: ${{ needs.docker.outputs.imagem }}
+          TAG: ${{ needs.docker.outputs.tag }}
+        run: |
+          VERSAO=$(node -p "require('./package.json').version")
+          echo "🚀 Iniciando deploy da versão ${VERSAO} (commit ${TAG})"
+          echo "1/3 - Baixando a imagem: docker pull ${IMAGEM}:${TAG}"
+          sleep 1
+          echo "2/3 - Atualizando o serviço: docker service update --image ${IMAGEM}:${TAG} loja-virtual"
+          sleep 1
+          echo "3/3 - Verificando a saúde: curl -f https://loja.exemplo.com.br/api/health"
+          sleep 1
+          echo "✅ Deploy concluído com sucesso!"
+          {
+            echo "## Deploy"
+            echo "✅ Deploy em produção (simulado) da versão ${VERSAO} - commit ${TAG}"
+            echo ""
+            echo "- Imagem: \`${IMAGEM}:${TAG}\`"
+            echo "- Ambiente: \`production\`"
+          } >> "$GITHUB_STEP_SUMMARY"
