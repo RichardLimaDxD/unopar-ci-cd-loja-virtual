@@ -1,0 +1,17 @@
+# Dependências
+node_modules/
+
+# Logs e relatórios gerados
+npm-debug.log*
+reports/
+coverage/
+resultado-testes.txt
+
+# Variáveis de ambiente
+.env
+
+# Sistema operacional / editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

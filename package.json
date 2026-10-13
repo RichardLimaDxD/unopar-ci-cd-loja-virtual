@@ -1,0 +1,32 @@
+{
+  "name": "loja-virtual-unopar",
+  "version": "1.0.0",
+  "description": "Loja Virtual de exemplo para a aula prática de Infraestrutura Ágil - pipeline de entrega contínua (CI/CD)",
+  "main": "src/server.js",
+  "private": true,
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test --test-reporter=spec test/*.test.js",
+    "lint": "eslint ."
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "ci-cd",
+    "gitlab-ci",
+    "github-actions",
+    "express",
+    "unopar"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "eslint": "^9.17.0",
+    "globals": "^15.14.0",
+    "supertest": "^7.0.0"
+  }
+}
